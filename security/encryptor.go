@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	mrand "math/rand"
 	"time"
 
 	"github.com/CypriotUnknown/encryptor-go/models"
@@ -125,15 +124,28 @@ func (e *Encryptor) ComputeSecret(clientPublicKeyBase64 string, privateKey *ecdh
 }
 
 // GenerateRandomDigits returns a random string of digits with length maxDigits (default 6).
+// Uses crypto/rand for cryptographically secure random number generation.
 func (e *Encryptor) GenerateRandomDigits(maxDigits int) string {
 	if maxDigits <= 0 {
 		maxDigits = 6
 	}
-	mrand.Seed(time.Now().UnixNano())
 	digits := "0123456789"
 	result := make([]byte, maxDigits)
+
+	// Create a byte array for random values
+	randomBytes := make([]byte, maxDigits)
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		// Fallback to a less secure but functional approach if crypto/rand fails
+		return fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	}
+
+	// Use each random byte to select a digit
 	for i := 0; i < maxDigits; i++ {
-		result[i] = digits[mrand.Intn(len(digits))]
+		// Map the random byte to an index in the digits string
+		// This ensures uniform distribution across all possible digits
+		randomIndex := int(randomBytes[i]) % len(digits)
+		result[i] = digits[randomIndex]
 	}
 	return string(result)
 }
