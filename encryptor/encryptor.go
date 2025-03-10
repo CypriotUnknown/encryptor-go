@@ -9,11 +9,12 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
-	"encryptor/models"
 	"errors"
 	"fmt"
 	mrand "math/rand"
 	"time"
+
+	"github.com/CypriotUnknown/encryptor-go/models"
 )
 
 // OIDs for EC keys (P-256)
