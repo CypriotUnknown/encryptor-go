@@ -140,7 +140,7 @@ func (e *Encryptor) GenerateRandomDigits(maxDigits int) string {
 // EncryptContent encrypts the given content using AES-256-CBC.
 // The provided secret is base64-encoded (it should decode to 32 bytes).
 // It returns an EncryptedBodyDTO with IV (base64) and hash (hex).
-func (e *Encryptor) EncryptContent(content, secret string) (*models.EncryptedBodyDTO, error) {
+func (e *Encryptor) EncryptContent(content, secret string) (*models.EncryptedBody, error) {
 	key, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {
 		return nil, err
@@ -160,14 +160,14 @@ func (e *Encryptor) EncryptContent(content, secret string) (*models.EncryptedBod
 	cipherText := make([]byte, len(paddedContent))
 	mode := cipher.NewCBCEncrypter(block, iv)
 	mode.CryptBlocks(cipherText, paddedContent)
-	return &models.EncryptedBodyDTO{
+	return &models.EncryptedBody{
 		IV:   base64.StdEncoding.EncodeToString(iv),
 		Hash: hex.EncodeToString(cipherText),
 	}, nil
 }
 
 // DecryptContent decrypts the given EncryptedBodyDTO using AES-256-CBC and the provided secret.
-func (e *Encryptor) DecryptContent(content models.APIResponse[models.EncryptedBodyDTO], secret string) (string, error) {
+func (e *Encryptor) DecryptContent(content models.EncryptedBody, secret string) (string, error) {
 	// Decode the secret key from base64
 	key, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {
@@ -184,7 +184,7 @@ func (e *Encryptor) DecryptContent(content models.APIResponse[models.EncryptedBo
 	}
 
 	// Decode the IV from base64
-	iv, err := base64.StdEncoding.DecodeString(content.Data.IV)
+	iv, err := base64.StdEncoding.DecodeString(content.IV)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode IV: %v", err)
 	}
@@ -193,7 +193,7 @@ func (e *Encryptor) DecryptContent(content models.APIResponse[models.EncryptedBo
 	}
 
 	// Decode the ciphertext (hash) from hex
-	cipherText, err := hex.DecodeString(content.Data.Hash)
+	cipherText, err := hex.DecodeString(content.Hash)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode ciphertext: %v", err)
 	}
