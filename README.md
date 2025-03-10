@@ -42,12 +42,12 @@ To generate keys:
 package main
 
 import (
-	"encryptor/encryptor"
+	"github.com/CypriotUnknown/encryptor-go/security"
 	"fmt"
 )
 
 func main() {
-	enc := encryptor.NewEncryptor()
+	enc := security.NewEncryptor()
 
 	// Generate key pair
 	privateKeyString, publicKeyString, privateKey, err := enc.GenerateKeys()
