@@ -13,7 +13,6 @@ import (
 	"sync"
 )
 
-// Encryptor class
 type Encryptor struct {
 	stringUtil stringUtility `json:"-"`
 }
