@@ -1,7 +1,5 @@
-# Go mod files
+.DS_Store
 go.sum
-
-# VS Code
 .vscode/
 
 main
