@@ -1,4 +1,4 @@
-package models
+package security
 
 import "encoding/json"
 
@@ -7,12 +7,12 @@ type EncryptedBody struct {
 	Hash string `json:"hash"`
 }
 
-func UnmarshalEncryptedBody(bytes []byte) (*EncryptedBody, error) {
-	var body EncryptedBody
+func (body *EncryptedBody) UnmarshalEncryptedBody(bytes []byte) error {
+
 	err := json.Unmarshal(bytes, &body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &body, nil
+	return nil
 }

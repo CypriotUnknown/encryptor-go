@@ -6,225 +6,192 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/asn1"
 	"encoding/base64"
-	"encoding/hex"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"time"
-
-	"github.com/CypriotUnknown/encryptor-go/models"
+	"math/big"
+	"sync"
 )
 
-// OIDs for EC keys (P-256)
-var oidEcPublicKey = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
-var oidNamedCurveP256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
-
-// ASN.1 structures for SPKI (public key)
-type algorithmIdentifier struct {
-	Algorithm  asn1.ObjectIdentifier
-	Parameters asn1.ObjectIdentifier
+// Encryptor class
+type Encryptor struct {
+	stringUtil stringUtility `json:"-"`
 }
 
-type subjectPublicKeyInfo struct {
-	Algo      algorithmIdentifier
-	PublicKey asn1.BitString
+var (
+	sharedInstance *Encryptor
+	once           sync.Once
+
+	curve = ecdh.P256()
+)
+
+// Singleton pattern
+func GetInstance() *Encryptor {
+	once.Do(func() {
+		sharedInstance = &Encryptor{
+			stringUtil: stringUtility{},
+		}
+	})
+	return sharedInstance
 }
 
-// ASN.1 structures for EC private key (embedded in PKCS#8)
-type ecPrivateKeyASN struct {
-	Version    int
-	PrivateKey []byte
-	// Include the public key as an explicit tag 1 (optional)
-	PublicKey asn1.BitString `asn1:"explicit,tag:1,optional"`
+// Generate ECDH key pair
+func (e *Encryptor) GenerateKeys(platform Platform) *SecurityKeysOutput {
+	privateKey, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+
+	if platform == PlatformBrowser {
+		return e.generateKeysForBrowser(privateKey)
+	} else {
+		return e.generateKeysForApp(privateKey)
+	}
+
 }
 
-type pkcs8 struct {
-	Version    int
-	Algo       algorithmIdentifier
-	PrivateKey []byte
+// Generate crypto key from base64 (full TS equivalent)
+func (e *Encryptor) GenerateCryptoKeyFromBase64(dto *GenerateCryptoKeyFromBase64Dto) *KeyFromBase64Output {
+	if dto.Platform == PlatformApp {
+		return e.generateCryptoKeyFromBase64StringForAppPlatform(dto.Base64KeyString, dto.ReturnKey)
+	} else {
+		// Browser (JWK)
+		return e.generateJWKCryptoKeyFromBase64String(dto.Base64KeyString)
+	}
 }
 
-// Encryptor encapsulates the crypto methods.
-type Encryptor struct{}
+// Compute shared secret
+func (e *Encryptor) ComputeSecret(dto *ComputeSecretDTO) string {
+	var publicKey *ecdh.PublicKey
+	var err error
 
-// NewEncryptor returns a new Encryptor instance.
-func NewEncryptor() *Encryptor {
-	return &Encryptor{}
+	if dto.Platform == PlatformBrowser {
+		var jwk JWK
+		if err := json.Unmarshal([]byte(dto.ClientPublicKeyBase64), &jwk); err != nil {
+			panic(err)
+		}
+
+		x, _ := base64.RawURLEncoding.DecodeString(jwk.X)
+		y, _ := base64.RawURLEncoding.DecodeString(jwk.Y)
+
+		pubKeyBytes := make([]byte, 65)
+		pubKeyBytes[0] = 0x04
+		copy(pubKeyBytes[1:33], x)
+		copy(pubKeyBytes[33:65], y)
+
+		publicKey, err = curve.NewPublicKey(pubKeyBytes)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		output := e.generateCryptoKeyFromBase64StringForAppPlatform(dto.ClientPublicKeyBase64, "public")
+		publicKey = output.PublicKey
+	}
+
+	sharedSecret, err := dto.PrivateKey.ECDH(publicKey)
+	if err != nil {
+		panic(err)
+	}
+
+	hash := sha256.Sum256(sharedSecret)
+	return e.stringUtil.arrayBufferToString(hash[:], secretEncoding)
 }
 
-// GenerateKeys creates an ECDH key pair using P-256 and returns:
-// - privateKeyString (PKCS#8, base64 encoded)
-// - publicKeyString (SPKI, base64 encoded)
-// - the native private key for further operations.
-func (e *Encryptor) GenerateKeys() (privateKeyString string, publicKeyString string, privateKey *ecdh.PrivateKey, err error) {
-	curve := ecdh.P256()
-	priv, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return "", "", nil, err
-	}
-	pub := priv.PublicKey()
-	spkiDER, err := marshalSPKI(pub)
-	if err != nil {
-		return "", "", nil, err
-	}
-	pkcs8DER, err := marshalPKCS8(priv)
-	if err != nil {
-		return "", "", nil, err
-	}
-	// Encode using base64 (keyEncoding)
-	publicKeyString = base64.StdEncoding.EncodeToString(spkiDER)
-	privateKeyString = base64.StdEncoding.EncodeToString(pkcs8DER)
-	return privateKeyString, publicKeyString, priv, nil
-}
-
-// ComputePostmanSecret computes a shared secret from the postman's PKCS#8 private key and the server's SPKI public key.
-// The shared secret is digested with SHA-256 and then base64-encoded.
-func (e *Encryptor) ComputePostmanSecret(postmanPrivateKeyBase64, serverPublicKeyBase64 string) (string, error) {
-	postmanPrivDER, err := base64.StdEncoding.DecodeString(postmanPrivateKeyBase64)
-	if err != nil {
-		return "", err
-	}
-	serverPubDER, err := base64.StdEncoding.DecodeString(serverPublicKeyBase64)
-	if err != nil {
-		return "", err
-	}
-	postmanPriv, err := unmarshalPKCS8(postmanPrivDER)
-	if err != nil {
-		return "", err
-	}
-	serverPub, err := unmarshalSPKI(serverPubDER)
-	if err != nil {
-		return "", err
-	}
-	sharedSecret, err := postmanPriv.ECDH(serverPub)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(sharedSecret)
-	return base64.StdEncoding.EncodeToString(digest[:]), nil
-}
-
-// ComputeSecret computes a shared secret using the client's SPKI public key and the server's native private key.
-func (e *Encryptor) ComputeSecret(clientPublicKeyBase64 string, privateKey *ecdh.PrivateKey) (string, error) {
-	clientPubDER, err := base64.StdEncoding.DecodeString(clientPublicKeyBase64)
-	if err != nil {
-		return "", err
-	}
-	clientPub, err := unmarshalSPKI(clientPubDER)
-	if err != nil {
-		return "", err
-	}
-	sharedSecret, err := privateKey.ECDH(clientPub)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(sharedSecret)
-	return base64.StdEncoding.EncodeToString(digest[:]), nil
-}
-
-// GenerateRandomDigits returns a random string of digits with length maxDigits (default 6).
-// Uses crypto/rand for cryptographically secure random number generation.
+// Generate random digits
 func (e *Encryptor) GenerateRandomDigits(maxDigits int) string {
-	if maxDigits <= 0 {
+	if maxDigits == 0 {
 		maxDigits = 6
 	}
-	digits := "0123456789"
-	result := make([]byte, maxDigits)
 
-	// Create a byte array for random values
-	randomBytes := make([]byte, maxDigits)
-	_, err := rand.Read(randomBytes)
-	if err != nil {
-		// Fallback to a less secure but functional approach if crypto/rand fails
-		return fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	output := ""
+	for range maxDigits {
+		digit, _ := rand.Int(rand.Reader, big.NewInt(10))
+		output += digit.String()
 	}
 
-	// Use each random byte to select a digit
-	for i := 0; i < maxDigits; i++ {
-		// Map the random byte to an index in the digits string
-		// This ensures uniform distribution across all possible digits
-		randomIndex := int(randomBytes[i]) % len(digits)
-		result[i] = digits[randomIndex]
-	}
-	return string(result)
+	return output
 }
 
-// EncryptContent encrypts the given content using AES-256-CBC.
-// The provided secret is base64-encoded (it should decode to 32 bytes).
-// It returns an EncryptedBodyDTO with IV (base64) and hash (hex).
-func (e *Encryptor) EncryptContent(content, secret string) (*models.EncryptedBody, error) {
-	key, err := base64.StdEncoding.DecodeString(secret)
-	if err != nil {
-		return nil, err
-	}
-	if len(key) != 32 {
-		return nil, errors.New("secret key must be 32 bytes")
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	iv := make([]byte, aes.BlockSize)
+// Encrypt content
+func (e *Encryptor) EncryptContent(dto *EncryptContentDto) (*EncryptedBody, error) {
+	iv := make([]byte, 16)
 	if _, err := rand.Read(iv); err != nil {
 		return nil, err
 	}
-	paddedContent := pkcs7Pad([]byte(content), aes.BlockSize)
-	cipherText := make([]byte, len(paddedContent))
+
+	secretBytes, err := e.stringUtil.stringToArrayBuffer(dto.Secret, secretEncoding)
+	if err != nil {
+		return nil, err
+	}
+
+	block, err := aes.NewCipher(secretBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	contentBytes := []byte(dto.Content)
+	padding := aes.BlockSize - len(contentBytes)%aes.BlockSize
+	padtext := make([]byte, padding)
+	for i := range padtext {
+		padtext[i] = byte(padding)
+	}
+	contentBytes = append(contentBytes, padtext...)
+
 	mode := cipher.NewCBCEncrypter(block, iv)
-	mode.CryptBlocks(cipherText, paddedContent)
-	return &models.EncryptedBody{
-		IV:   base64.StdEncoding.EncodeToString(iv),
-		Hash: hex.EncodeToString(cipherText),
+	encrypted := make([]byte, len(contentBytes))
+	mode.CryptBlocks(encrypted, contentBytes)
+
+	var hashEncoding string
+	switch dto.Platform {
+	case PlatformApp:
+		hashEncoding = "base64"
+	case PlatformBrowser:
+		hashEncoding = clientEncoding
+	default:
+		panic("bad platform")
+	}
+
+	return &EncryptedBody{
+		IV:   e.stringUtil.arrayBufferToString(iv, ivEncoding),
+		Hash: e.stringUtil.arrayBufferToString(encrypted, hashEncoding),
 	}, nil
 }
 
-// DecryptContent decrypts the given EncryptedBodyDTO using AES-256-CBC and the provided secret.
-func (e *Encryptor) DecryptContent(content models.EncryptedBody, secret string) (string, error) {
-	// Decode the secret key from base64
-	key, err := base64.StdEncoding.DecodeString(secret)
+// Decrypt content
+func (e *Encryptor) DecryptContent(dto *DecryptContentDto) ([]byte, error) {
+	secretBytes, err := e.stringUtil.stringToArrayBuffer(dto.Secret, secretEncoding)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode secret key: %v", err)
+		return nil, err
 	}
-	if len(key) != 32 {
-		return "", fmt.Errorf("invalid secret key length: expected 32 bytes, got %d", len(key))
-	}
-
-	// Initialize the AES block cipher
-	block, err := aes.NewCipher(key)
+	ivBytes, err := e.stringUtil.stringToArrayBuffer(dto.Content.IV, ivEncoding)
 	if err != nil {
-		return "", fmt.Errorf("failed to create AES cipher: %v", err)
+		return nil, err
 	}
 
-	// Decode the IV from base64
-	iv, err := base64.StdEncoding.DecodeString(content.IV)
+	var hashEncoding string
+	switch dto.Platform {
+	case PlatformApp:
+		hashEncoding = "base64"
+	case PlatformBrowser:
+		hashEncoding = clientEncoding
+	default:
+		panic(fmt.Sprintf("bad platform: %s", dto.Platform))
+	}
+
+	encryptedBytes, err := e.stringUtil.stringToArrayBuffer(dto.Content.Hash, hashEncoding)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode IV: %v", err)
-	}
-	if len(iv) != aes.BlockSize {
-		return "", fmt.Errorf("invalid IV length: expected %d bytes, got %d", aes.BlockSize, len(iv))
+		return nil, err
 	}
 
-	// Decode the ciphertext (hash) from hex
-	cipherText, err := hex.DecodeString(content.Hash)
+	block, err := aes.NewCipher(secretBytes)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode ciphertext: %v", err)
+		return nil, err
 	}
-	if len(cipherText)%aes.BlockSize != 0 {
-		return "", fmt.Errorf("ciphertext is not a multiple of the AES block size")
-	}
+	mode := cipher.NewCBCDecrypter(block, ivBytes)
 
-	// Decrypt the ciphertext using CBC mode
-	mode := cipher.NewCBCDecrypter(block, iv)
-	plainPadded := make([]byte, len(cipherText))
-	mode.CryptBlocks(plainPadded, cipherText)
+	decrypted := make([]byte, len(encryptedBytes))
+	mode.CryptBlocks(decrypted, encryptedBytes)
 
-	// Unpad the decrypted plaintext
-	plaintext, err := pkcs7Unpad(plainPadded, aes.BlockSize)
-	if err != nil {
-		return "", fmt.Errorf("failed to unpad the decrypted data: %v", err)
-	}
-
-	// Return the plaintext as a string
-	return string(plaintext), nil
+	padding := int(decrypted[len(decrypted)-1])
+	return decrypted[:len(decrypted)-padding], nil
 }
